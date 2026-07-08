@@ -25,7 +25,7 @@
   --panel:#ffffff; --border:#dbe3e8; --txt:#1b2b34; --muted:#7b8a93;
   --accent:#0e6e8c; --bg:#e9edf1; --err:#dc2626; --warn:#a87b00;
   --c-green:#16a34a; --c-red:#dc2626; --c-blue:#2563eb; --c-orange:#ea7317; --c-purple:#9333ea; --c-gray:#4b5563;
-  --sheet-collapsed: 56px;
+  --sheet-collapsed: 76px;
   --sheet-expanded: 68vh;
 }
 *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
@@ -135,16 +135,25 @@ button{font-family:inherit;}
 }
 #sheet.open{ height:var(--sheet-expanded); }
 #sheetHandle{
-  display:flex; align-items:center; gap:10px; padding:9px 14px; flex-shrink:0;
+  padding:11px 14px 8px; flex-shrink:0; position:relative;
 }
 #sheetHandle .grip{width:38px; height:4px; border-radius:3px; background:#c7d2d8; position:absolute; left:50%; top:6px; transform:translateX(-50%);}
-#sheetProjName{font-size:12.5px; font-weight:600; color:var(--txt); flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:6px;}
-.modeSwitch{display:flex; border:1px solid var(--border); border-radius:9px; overflow:hidden; flex-shrink:0; margin-top:4px;}
+.handleRow1{display:flex; align-items:center; gap:10px; margin-top:5px;}
+#sheetProjName{font-size:12.5px; font-weight:600; color:var(--txt); flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+.modeSwitch{display:flex; border:1px solid var(--border); border-radius:9px; overflow:hidden; flex-shrink:0;}
 .modeSwitch button{border:none; background:#fff; color:var(--txt); font-size:12.5px; font-weight:600; padding:6px 12px;}
 .modeSwitch button.active{background:var(--accent); color:#fff;}
-#sheetBody{flex:1; overflow-y:auto; padding:6px 14px 24px; -webkit-overflow-scrolling:touch;}
-#sheetBody.hidden-when-collapsed{display:none;}
-#sheet.open #sheetBody{display:block;}
+#selSummary{margin-top:5px; font-size:11px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+#selSummary.has{color:var(--accent); font-weight:600;}
+#sheetBody{flex:1; min-height:0; overflow-y:auto; padding:6px 14px 24px; -webkit-overflow-scrolling:touch;}
+
+/* 展開表（Setpoint 條件）參數設定：固定在抽屜最下方，不隨樹狀清單捲動而消失 */
+#pendPanelSticky{
+  flex-shrink:0; display:none; overflow-y:auto; max-height:34vh;
+  border-top:1px solid #eecf8a; background:#fffaf0;
+  padding:8px 14px calc(10px + env(safe-area-inset-bottom));
+}
+#pendPanelSticky.show{display:block;}
 
 .legendRow{display:flex; flex-wrap:wrap; gap:6px 10px; padding:8px 0 12px; border-bottom:1px solid var(--border); margin-bottom:8px;}
 .legendRow .lg{display:flex; align-items:center; gap:4px; font-size:11px; color:var(--muted);}
@@ -226,18 +235,21 @@ button{font-family:inherit;}
 <div id="sheet">
   <div id="sheetHandle">
     <div class="grip"></div>
-    <div id="sheetProjName">請先載入專案檔</div>
-    <div class="modeSwitch">
-      <button id="btnEMMode" class="active">EM</button>
-      <button id="btnPHMode">Phase</button>
+    <div class="handleRow1">
+      <div id="sheetProjName">請先載入專案檔</div>
+      <div class="modeSwitch">
+        <button id="btnEMMode" class="active">EM</button>
+        <button id="btnPHMode">Phase</button>
+      </div>
     </div>
+    <div id="selSummary">請先載入專案檔</div>
   </div>
   <div id="sheetBody">
     <div class="legendRow" id="legendRow"></div>
     <div class="tree" id="dispTree"></div>
-    <div id="pendPanel"></div>
     <div id="confPanel"></div>
   </div>
+  <div id="pendPanelSticky"></div>
 </div>
 
 <div id="modalOverlay">
@@ -666,11 +678,11 @@ function recompute(){
           const ckey = `${phKey}||${cond.param}`;
           const chosenVal = condChoices[ckey];
           const desc = `${cond.param}：` + cond.options.map(o=>`${o.val}→${o.state}`).join('、');
+          if(!pendMap[ckey]) pendMap[ckey] = { ph, phKey, param:cond.param, ckey, vals:{} };
+          cond.options.forEach(o=>{
+            (pendMap[ckey].vals[o.val] = pendMap[ckey].vals[o.val] || new Set()).add(o.state);
+          });
           if(chosenVal === undefined){
-            if(!pendMap[ckey]) pendMap[ckey] = { ph, phKey, param:cond.param, ckey, vals:{} };
-            cond.options.forEach(o=>{
-              (pendMap[ckey].vals[o.val] = pendMap[ckey].vals[o.val] || new Set()).add(o.state);
-            });
             cond.options.forEach(o=> Object.keys(em.states[o.state] || {}).forEach(comp=>{
               markPending(map, em.system + '-' + comp, `${ph.phaseId}｜Step ${stp.no} ${stp.name}｜${em.emId} 條件 ${v}（${desc}）`);
             }));
@@ -693,7 +705,20 @@ function recompute(){
   applyMap(map);
   renderPendPanel(pend);
   renderConfPanel(map);
+  updateSelSummary();
   if(warnNotes.length) toast(warnNotes[0], 'warn');
+}
+function updateSelSummary(){
+  const el = $('#selSummary');
+  if(!hasProject){ el.textContent = '請先載入專案檔'; el.classList.remove('has'); return; }
+  const labels = currentSelectionLabels();
+  if(!labels.length){
+    el.textContent = '尚未勾選任何' + (dispMode==='EM' ? ' EM 狀態' : ' Phase 步驟');
+    el.classList.remove('has');
+    return;
+  }
+  el.textContent = (dispMode==='EM' ? 'EM：' : 'Phase：') + labels.join('、');
+  el.classList.add('has');
 }
 function applyMap(map){
   const conflicted = [];
@@ -743,9 +768,10 @@ function renderConfPanel(map){
   d.innerHTML = html;
 }
 function renderPendPanel(pend){
-  const d = $('#pendPanel'); d.innerHTML = '';
-  if(!pend.length) return;
-  let html = `<h4 style="margin:12px 0 4px">⚙ 展開表參數設定</h4>`;
+  const d = $('#pendPanelSticky');
+  if(!pend.length){ d.classList.remove('show'); d.innerHTML=''; return; }
+  d.classList.add('show');
+  let html = `<h4 style="margin:0 0 4px">⚙ 展開表參數設定</h4>`;
   html += `<div class="hint" style="margin:0 0 8px">同一 Phase 的同一參數設定一次、全 Phase 套用。未指定時相關色塊以<b style="color:#a87b00">閃黃框</b>標示。</div>`;
   pend.forEach(p=>{
     const cur = condChoices[p.ckey];
