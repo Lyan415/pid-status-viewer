@@ -76,6 +76,42 @@ button{font-family:inherit;}
 }
 .fitBtn:active{background:#eef3f6;}
 
+/* 縮放控制（右側按鈕＋滑桿） */
+#zoomControls{
+  position:absolute; right:10px; top:14px; z-index:6;
+  display:flex; flex-direction:column; align-items:center; gap:0;
+  background:#fff; border:1px solid var(--border); border-radius:12px;
+  box-shadow:0 2px 8px rgba(20,40,55,.15); padding:4px; width:44px;
+}
+#zoomControls button{
+  width:36px; height:40px; border:none; background:transparent; color:var(--txt);
+  font-size:20px; font-weight:600; line-height:1; border-radius:8px;
+}
+#zoomControls button:active{background:#eef3f6;}
+#zoomSliderWrap{
+  height:150px; display:flex; align-items:center; justify-content:center; padding:8px 0;
+}
+#zoomSlider{
+  -webkit-appearance:none; appearance:none;
+  width:150px; height:34px; margin:0;
+  transform:rotate(-90deg);
+  background:transparent;
+}
+#zoomSlider::-webkit-slider-runnable-track{
+  height:5px; border-radius:3px; background:var(--border);
+}
+#zoomSlider::-webkit-slider-thumb{
+  -webkit-appearance:none; appearance:none;
+  width:26px; height:26px; border-radius:50%;
+  background:var(--accent); border:3px solid #fff;
+  box-shadow:0 1px 4px rgba(0,0,0,.3); margin-top:-10.5px;
+}
+#zoomSlider::-moz-range-track{ height:5px; border-radius:3px; background:var(--border); }
+#zoomSlider::-moz-range-thumb{
+  width:26px; height:26px; border-radius:50%; border:3px solid #fff;
+  background:var(--accent); box-shadow:0 1px 4px rgba(0,0,0,.3);
+}
+
 /* block tap info card */
 #blockInfo{
   position:absolute; left:10px; right:10px; bottom:44px; z-index:8;
@@ -179,6 +215,11 @@ button{font-family:inherit;}
   </div>
   <div class="fitBtn" id="btnFit">🔍 縮放至全圖</div>
   <div class="zoomInfo" id="zoomDisp">100%</div>
+  <div id="zoomControls">
+    <button id="btnZoomIn" title="放大">＋</button>
+    <div id="zoomSliderWrap"><input type="range" id="zoomSlider" min="-100" max="100" value="0" step="1"></div>
+    <button id="btnZoomOut" title="縮小">－</button>
+  </div>
   <div id="blockInfo"><div class="biHead"><span id="biName"></span><button class="biClose" id="biClose">✕</button></div><div id="biBody"></div></div>
 </div>
 
@@ -349,40 +390,94 @@ $('#fileProj').onchange = e=>{
 /* ============================================================
    畫布（Konva）— 支援單指拖曳、雙指縮放
    ============================================================ */
+const MIN_SCALE = 0.02, MAX_SCALE = 12;
+function clampScale(s){ return Math.max(MIN_SCALE, Math.min(MAX_SCALE, s)); }
+function scaleToSlider(s){
+  const t = Math.log(clampScale(s)/MIN_SCALE) / Math.log(MAX_SCALE/MIN_SCALE);
+  return Math.round(t*200-100);
+}
+function sliderToScale(v){
+  const t = (v+100)/200;
+  return MIN_SCALE * Math.pow(MAX_SCALE/MIN_SCALE, t);
+}
+function updateZoomUI(scale){
+  $('#zoomDisp').textContent = Math.round(scale*100) + '%';
+  if(!sliderTouching) $('#zoomSlider').value = scaleToSlider(scale);
+}
+
+/* 互動期間暫時降低畫布解析度以避免手機縮放/拖曳卡頓，放開後再還原成高解析度 */
+let lowResMode = false, restoreResTimer = null, fullPixelRatio = window.devicePixelRatio || 1;
+function enterLowRes(stage){
+  if(lowResMode || !dispLayer) return;
+  lowResMode = true;
+  dispLayer.getCanvas().setPixelRatio(1);
+}
+function exitLowResSoon(){
+  clearTimeout(restoreResTimer);
+  restoreResTimer = setTimeout(()=>{
+    if(!lowResMode || !dispLayer) return;
+    lowResMode = false;
+    dispLayer.getCanvas().setPixelRatio(fullPixelRatio);
+    dispLayer.draw();
+  }, 220);
+}
+
+function setScaleAtPoint(stage, newScale, pointerScreen){
+  newScale = clampScale(newScale);
+  const old = stage.scaleX();
+  const p = pointerScreen || { x: stage.width()/2, y: stage.height()/2 };
+  const m = { x:(p.x-stage.x())/old, y:(p.y-stage.y())/old };
+  stage.scale({x:newScale, y:newScale});
+  stage.position({ x:p.x - m.x*newScale, y:p.y - m.y*newScale });
+  stage.batchDraw();
+  updateZoomUI(newScale);
+}
+
 function enableTouchZoom(stage){
-  let lastCenter = null, lastDist = 0;
+  let lastCenter = null, lastDist = 0, rafId = null, pending = null;
   const dist = (p1,p2)=> Math.hypot(p2.x-p1.x, p2.y-p1.y);
   const center = (p1,p2)=> ({ x:(p1.x+p2.x)/2, y:(p1.y+p2.y)/2 });
+  function applyPending(){
+    rafId = null;
+    if(!pending) return;
+    stage.scale({x:pending.scale, y:pending.scale});
+    stage.position(pending.pos);
+    stage.batchDraw();
+    updateZoomUI(pending.scale);
+    pending = null;
+  }
   stage.on('touchmove', e=>{
     const t1 = e.evt.touches[0], t2 = e.evt.touches[1];
     if(t1 && t2){
       e.evt.preventDefault();
       if(stage.isDragging()) stage.stopDrag();
+      enterLowRes(stage);
       const box = stage.container().getBoundingClientRect();
       const p1 = { x:t1.clientX - box.left, y:t1.clientY - box.top };
       const p2 = { x:t2.clientX - box.left, y:t2.clientY - box.top };
       if(!lastCenter){ lastCenter = center(p1,p2); lastDist = dist(p1,p2); return; }
       const newCenter = center(p1,p2), newDist = dist(p1,p2);
-      const pointTo = { x:(newCenter.x - stage.x())/stage.scaleX(), y:(newCenter.y - stage.y())/stage.scaleX() };
-      let scale = stage.scaleX() * (newDist/lastDist);
-      scale = Math.max(0.02, Math.min(12, scale));
-      stage.scale({x:scale, y:scale});
+      const curScale = pending ? pending.scale : stage.scaleX();
+      const curX = pending ? pending.pos.x : stage.x();
+      const curY = pending ? pending.pos.y : stage.y();
+      const pointTo = { x:(newCenter.x - curX)/curScale, y:(newCenter.y - curY)/curScale };
+      const scale = clampScale(curScale * (newDist/lastDist));
       const dx = newCenter.x - lastCenter.x, dy = newCenter.y - lastCenter.y;
-      stage.position({ x:newCenter.x - pointTo.x*scale + dx, y:newCenter.y - pointTo.y*scale + dy });
+      pending = { scale, pos:{ x:newCenter.x - pointTo.x*scale + dx, y:newCenter.y - pointTo.y*scale + dy } };
       lastDist = newDist; lastCenter = newCenter;
-      $('#zoomDisp').textContent = Math.round(scale*100) + '%';
+      if(rafId === null) rafId = requestAnimationFrame(applyPending);
     }
   });
-  stage.on('touchend', ()=>{ lastDist = 0; lastCenter = null; });
+  stage.on('touchend', ()=>{ lastDist = 0; lastCenter = null; exitLowResSoon(); });
+  stage.on('dragmove', ()=> enterLowRes(stage));
+  stage.on('dragend', ()=> exitLowResSoon());
   stage.on('wheel', e=>{
     e.evt.preventDefault();
+    enterLowRes(stage);
     const old = stage.scaleX(), p = stage.getPointerPosition();
-    const m = { x:(p.x-stage.x())/old, y:(p.y-stage.y())/old };
     let s = e.evt.deltaY > 0 ? old/1.12 : old*1.12;
-    s = Math.max(0.02, Math.min(12, s));
-    stage.scale({x:s, y:s});
-    stage.position({ x:p.x - m.x*s, y:p.y - m.y*s });
-    $('#zoomDisp').textContent = Math.round(s*100) + '%';
+    setScaleAtPoint(stage, s, p);
+    exitLowResSoon();
   });
 }
 function fitStage(stage){
@@ -396,9 +491,22 @@ function fitStage(stage){
   const s = Math.min(W/(maxX-minX+pad*2), H/(maxY-minY+pad*2));
   stage.scale({x:s,y:s});
   stage.position({ x:(W-(maxX+minX)*s)/2, y:(H-(maxY+minY)*s)/2 });
-  $('#zoomDisp').textContent = Math.round(s*100)+'%';
+  stage.batchDraw();
+  updateZoomUI(s);
 }
 $('#btnFit').onclick = ()=>{ if(dispStage) fitStage(dispStage); };
+
+/* ---------- 側邊縮放按鈕與滑桿 ---------- */
+$('#btnZoomIn').onclick = ()=>{ if(dispStage) setScaleAtPoint(dispStage, dispStage.scaleX()*1.3); };
+$('#btnZoomOut').onclick = ()=>{ if(dispStage) setScaleAtPoint(dispStage, dispStage.scaleX()/1.3); };
+let sliderTouching = false;
+const zoomSliderEl = $('#zoomSlider');
+zoomSliderEl.addEventListener('pointerdown', ()=>{ sliderTouching = true; enterLowRes(dispStage); });
+zoomSliderEl.addEventListener('pointerup', ()=>{ sliderTouching = false; exitLowResSoon(); });
+zoomSliderEl.addEventListener('input', e=>{
+  if(!dispStage) return;
+  setScaleAtPoint(dispStage, sliderToScale(+e.target.value));
+});
 
 function dispLoadImg(src){ return new Promise((res,rej)=>{ const im=new window.Image(); im.onload=()=>res(im); im.onerror=()=>rej(new Error('影像載入失敗')); im.src=src; }); }
 
